@@ -1,0 +1,22 @@
+name: Django CI
+on:
+  pull_request:
+
+jobs:
+  Build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v2
+      - uses: ricardochaves/python-lint@v1.4.0
+        with:
+          use-flake8: true
+          use-pylint: false
+          use-pycodestyle: false
+          use-black: false
+          use-mypy: false
+          use-isort: false
+          extra-flake8-options: "--max-line-length=140 --per-file-ignores=__init__.py:F401,F811 --exclude=*/migrations/*"
+          extra-pylint-options: ""
+          extra-black-options: ""
+          extra-mypy-options: ""
+          extra-isort-options: ""

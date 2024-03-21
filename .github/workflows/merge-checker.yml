@@ -1,0 +1,19 @@
+name: Merge Check
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  merge-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR source branch
+        run: |
+          if [[ "${{ github.event.pull_request.base.ref }}" == "main" && "${{ github.event.pull_request.head.ref }}" == "staging" ]]; then
+            echo "Merge allowed from staging branch :)"
+          else
+            echo "Merge is blocked from non-staging branch :("
+            exit 1
+          fi

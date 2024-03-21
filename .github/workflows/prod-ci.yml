@@ -1,0 +1,208 @@
+name: Prod CI/CD
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+env:
+  WEB_IMAGE: ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')/web
+
+jobs:
+  build:
+    if: github.event.pull_request.merged == true
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v1
+      - name: Add environment variables to .env
+        run: |
+          echo DEBUG=${{ secrets.DEBUG }} >> .env
+          echo SECRET_KEY="${{ secrets.SECRET_KEY }}" >> .env
+
+          echo EMAIL_HOST_USER=${{ secrets.EMAIL_HOST_USER }} >> .env
+          echo EMAIL_HOST_PASSWORD=${{ secrets.EMAIL_HOST_PASSWORD }} >> .env
+
+          echo SENDGRID_API_KEY=${{ secrets.SENDGRID_API_KEY }} >> .env
+
+          echo FUNDS_DATABASE_URL="${{ secrets.FUNDS_DATABASE_URL }}" >> .env
+          echo DEFAULT_DATABASE_URL="${{ secrets.DEFAULT_DATABASE_URL }}" >> .env
+          echo POSTGRES_HOST_AUTH_METHOD=${{ secrets.POSTGRES_HOST_AUTH_METHOD }} >> .env
+
+          echo AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" >> .env
+          echo AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> .env
+          echo AWS_STORAGE_BUCKET_NAME="${{ secrets.AWS_STORAGE_BUCKET_NAME }}" >> .env
+          echo AWS_STORAGE_FOLDER="${{ secrets.AWS_STORAGE_FOLDER }}" >> .env
+
+          echo FRONTEND_DOMAIN="${{ secrets.FRONTEND_DOMAIN }}" >> .env
+
+          echo HOST_ADDRESS="${{ secrets.HOST_ADDRESS }}" >> .env
+          echo ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}" >> .env
+          echo CSRF_TRUSTED_ORIGINS="${{ secrets.CSRF_TRUSTED_ORIGINS }}" >> .env
+
+      - name: Set environment variables
+        run: |
+          echo "WEB_IMAGE=$(echo ${{env.WEB_IMAGE}} )" >> $GITHUB_ENV
+      - name: Log in to GitHub Packages
+        run: echo "${PERSONAL_ACCESS_TOKEN}" | docker login ghcr.io -u ${{ secrets.NAMESPACE }} --password-stdin
+        env:
+          PERSONAL_ACCESS_TOKEN: "${{ secrets.PERSONAL_ACCESS_TOKEN }}"
+      - name: Pull images
+        run: |
+          docker pull ${{ env.WEB_IMAGE }} || true
+      - name: Build images
+        run: |
+          docker-compose -f docker-compose.prod.yml build
+      - name: Push images
+        run: |
+          docker push ${{ env.WEB_IMAGE }}
+
+  deploy:
+    name: Deploy to DigitalOcean
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: set time
+        run: echo "DATE=$(date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_ENV
+      - name: Send Slack notification on success
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.BACKEND_NOTIFICATION_SLACK_WEBHOOK_URL }}
+        run: |
+          DATE=
+          echo ""
+          curl -X POST -H 'Content-type: application/json' --data '{
+            "text": "*:gear: Deployment Started for App: exante-data-backend*",
+            "attachments": [
+                {
+                    "color": "good",
+                    "fields": [
+                        {
+                            "title": "A deployment for exante-data-backend created at ${{ env.DATE }} UTC has started!",
+                            "short": false
+                        },
+                        {
+                            "title": "Commit",
+                            "value": "<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|Commit Details>",
+                            "short": false
+                        },
+                        {
+                            "title": "Deployment",
+                            "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Deployment Details>",
+                            "short": false
+                        }
+                    ]
+                }
+            ]
+          }' $SLACK_WEBHOOK_URL
+
+      - name: Checkout master
+        uses: actions/checkout@v1
+      - name: Add environment variables to .env
+        run: |
+          echo DEBUG=${{ secrets.DEBUG }} >> .env
+          echo SECRET_KEY="${{ secrets.SECRET_KEY }}" >> .env
+
+          echo EMAIL_HOST_USER=${{ secrets.EMAIL_HOST_USER }} >> .env
+          echo EMAIL_HOST_PASSWORD=${{ secrets.EMAIL_HOST_PASSWORD }} >> .env
+
+          echo SENDGRID_API_KEY=${{ secrets.SENDGRID_API_KEY }} >> .env
+
+          echo FUNDS_DATABASE_URL="${{ secrets.FUNDS_DATABASE_URL }}" >> .env
+          echo DEFAULT_DATABASE_URL="${{ secrets.DEFAULT_DATABASE_URL }}" >> .env
+          echo POSTGRES_HOST_AUTH_METHOD=${{ secrets.POSTGRES_HOST_AUTH_METHOD }} >> .env
+
+          echo HOST_ADDRESS="${{ secrets.HOST_ADDRESS }}" >> .env
+          echo ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS}}" >> .env
+          echo CSRF_TRUSTED_ORIGINS="${{ secrets.CSRF_TRUSTED_ORIGINS }}" >> .env
+  
+          echo AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" >> .env
+          echo AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> .env
+          echo AWS_STORAGE_BUCKET_NAME="${{ secrets.AWS_STORAGE_BUCKET_NAME }}" >> .env
+          echo AWS_STORAGE_FOLDER="${{ secrets.AWS_STORAGE_FOLDER }}" >> .env
+
+          echo FRONTEND_DOMAIN="${{ secrets.FRONTEND_DOMAIN }}" >> .env
+
+          echo WEB_IMAGE=${{ env.WEB_IMAGE }} >> .env
+          echo NAMESPACE=${{ secrets.NAMESPACE }} >> .env
+          echo PERSONAL_ACCESS_TOKEN="${{ secrets.PERSONAL_ACCESS_TOKEN }}" >> .env
+
+      - name: Add the private SSH key to the ssh-agent
+        env:
+          SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+        run: |
+          mkdir -p ~/.ssh
+          ssh-agent -a $SSH_AUTH_SOCK > /dev/null
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          ssh-add - <<< "${{ secrets.PRIVATE_KEY }}"
+      - name: Build and deploy images on DigitalOcean
+        env:
+          SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+        run: |
+          scp -o StrictHostKeyChecking=no -r ./.env ./docker-compose.prod.yml root@${{ secrets.DIGITAL_OCEAN_IP_ADDRESS }}:/exante-data-backend
+          ssh -o StrictHostKeyChecking=no root@${{ secrets.DIGITAL_OCEAN_IP_ADDRESS }} << 'ENDSSH'
+            cd /exante-data-backend
+            source .env
+            docker login ghcr.io -u $NAMESPACE -p $PERSONAL_ACCESS_TOKEN
+            docker pull $WEB_IMAGE
+            docker-compose -f docker-compose.prod.yml up -d
+          ENDSSH
+
+      - name: Send Slack notification on success
+        if: success()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.BACKEND_NOTIFICATION_SLACK_WEBHOOK_URL }}
+        run: |
+          curl -X POST -H 'Content-type: application/json' --data '{
+            "text": "*:sunglasses: Deployment Live for App: exante-data-backend*",
+            "attachments": [
+                {
+                    "color": "#36a64f",
+                    "fields": [
+                        {
+                            "title": "A deployment for exante-data-backend went live at ${{ env.DATE }} UTC",
+                            "short": false
+                        },
+                        {
+                            "title": "Commit",
+                            "value": "<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|Commit Details>",
+                            "short": false
+                        },
+                        {
+                            "title": "Deployment",
+                            "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Deployment Details>",
+                            "short": false
+                        }
+                    ]
+                }
+            ]
+          }' $SLACK_WEBHOOK_URL
+
+      - name: Send Slack notification on failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.BACKEND_NOTIFICATION_SLACK_WEBHOOK_URL }}
+        run: |
+          curl -X POST -H 'Content-type: application/json' --data '{
+            "text": "*:x: Deployment failed for App: exante-data-backend*",
+            "attachments": [
+                {
+                    "color": "danger",
+                    "fields": [
+                        {
+                            "title": "A deployment for exante-data-backend failed at ${{ env.DATE }} UTC",
+                            "short": false
+                        },
+                        {
+                            "title": "Commit",
+                            "value": "<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|Commit Details>",
+                            "short": false
+                        },
+                        {
+                            "title": "Deployment",
+                            "value": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Deployment Details>",
+                            "short": false
+                        }
+                    ]
+                }
+            ]
+          }' $SLACK_WEBHOOK_URL
